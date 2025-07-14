@@ -20,7 +20,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.net.ssl.SSLEngine;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -83,6 +82,7 @@ public class SslContextHandler {
         return certificates.stream().filter(Certificate::hasKey);
     }
 
+
     boolean reloadSslContext() throws CertificateException {
         final var newCertificates = sslConfiguration.certificates();
 
@@ -96,7 +96,7 @@ public class SslContextHandler {
         if (notSameCertificates(loadedAuthorityCertificates, newAuthorityCertificates)) {
             LOGGER.debug("Certification authority has changed");
             hasChanges = true;
-            validateDates(newAuthorityCertificates);
+            sslConfiguration.trustStoreFactory();
         }
 
         if (notSameCertificates(loadedKeyMaterialCertificates, newKeyMaterialCertificates)) {

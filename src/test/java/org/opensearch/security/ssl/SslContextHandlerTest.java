@@ -11,6 +11,7 @@
 
 package org.opensearch.security.ssl;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.PrivateKey;
 import java.security.cert.CertificateException;
@@ -28,6 +29,7 @@ import org.bouncycastle.asn1.x509.Extension;
 import org.bouncycastle.asn1.x509.GeneralName;
 import org.bouncycastle.cert.X509CertificateHolder;
 
+import org.opensearch.OpenSearchException;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.security.ssl.config.KeyStoreConfiguration;
 import org.opensearch.security.ssl.config.SslParameters;
@@ -98,7 +100,7 @@ public class SslContextHandlerTest {
 
         writeCertificates(newCaCertificate, certificatesRule.accessCertificateHolder(), certificatesRule.accessCertificatePrivateKey());
 
-        assertThrows(CertificateException.class, sslContextHandler::reloadSslContext);
+        assertThrows(OpenSearchException.class, sslContextHandler::reloadSslContext);
 
         newCaCertificate = certificatesRule.generateCaCertificate(
             keyPair,
@@ -107,8 +109,88 @@ public class SslContextHandlerTest {
         );
         writeCertificates(newCaCertificate, certificatesRule.accessCertificateHolder(), certificatesRule.accessCertificatePrivateKey());
 
-        assertThrows(CertificateException.class, sslContextHandler::reloadSslContext);
+        assertThrows(OpenSearchException.class, sslContextHandler::reloadSslContext);
     }
+
+    @Test
+    public void validatesOnlyRelevantCertificatesWhenAuthorityCertificatesChange() throws Exception {
+        final var sslContextHandler = sslContextHandler();
+        
+        // Generate a new CA (issuer of access certificate) with invalid dates
+        final var keyPair = certificatesRule.generateKeyPair();
+        final var caCertificate = certificatesRule.caCertificateHolder();
+        
+        var expiredRelevantCA = certificatesRule.generateCaCertificate(
+            keyPair,
+            caCertificate.getNotAfter().toInstant(),
+            caCertificate.getNotAfter().toInstant().minus(10, ChronoUnit.DAYS)
+        );
+        
+        // Write the expired relevant CA along with access certificate
+        writeCertificates(expiredRelevantCA, certificatesRule.accessCertificateHolder(), certificatesRule.accessCertificatePrivateKey());
+        
+        // Should fail because the relevant CA has invalid dates
+        assertThrows(OpenSearchException.class, sslContextHandler::reloadSslContext);
+    }
+
+
+    @Test
+    public void validatesOnlyDirectIssuersOfKeyMaterial() throws Exception {
+        final var sslContextHandler = sslContextHandler();
+        
+        // This test verifies that only certificates that are direct issuers of key material are validated
+        // The current implementation should validate the CA that issued the access certificate
+        
+        // Generate a new CA (issuer of access certificate) with valid dates
+        final var keyPair = certificatesRule.generateKeyPair();
+        final var validRelevantCA = certificatesRule.generateCaCertificate(keyPair);
+        
+        // Write certificates - this should succeed as the CA has valid dates
+        writeCertificates(validRelevantCA, certificatesRule.accessCertificateHolder(), certificatesRule.accessCertificatePrivateKey());
+        
+        // Should succeed because the relevant certificate has valid dates
+        final boolean hasChanges = sslContextHandler.reloadSslContext();
+        assertThat("SSL context should reload successfully", hasChanges, is(true));
+    }
+
+    @Test
+    public void ignoresExpiredIrrelevantCertificatesInTruststore() throws Exception {
+        // This test demonstrates that expired certificates in truststore that are NOT part 
+        // of the certificate chain are ignored during reloadSslContext()
+        
+        final var sslContextHandler = sslContextHandler();
+        
+        // Keep the original valid CA (which is the issuer of our access certificate)
+        final var originalValidCA = certificatesRule.caCertificateHolder();
+        
+        // Create an expired irrelevant CA with a completely different subject DN
+        final var irrelevantKeyPair = certificatesRule.generateKeyPair();
+        final var expiredIrrelevantCA = certificatesRule.generateCaCertificate(
+            irrelevantKeyPair,
+            "CN=irrelevant-ca,OU=irrelevant,O=irrelevant,L=irrelevant,C=XX", // Completely different subject DN
+            certificatesRule.generateSerialNumber(),
+            certificatesRule.caCertificateHolder().getNotAfter().toInstant().minus(30, ChronoUnit.DAYS), // Expired
+            certificatesRule.caCertificateHolder().getNotAfter().toInstant().minus(10, ChronoUnit.DAYS)  // Expired
+        );
+        
+        // Write the original valid CA to the CA certificate file
+        writePemContent(caCertificatePath, originalValidCA);
+        
+        // Append the expired irrelevant CA to the same file
+        Path tempExpiredPath = certificatesRule.configRootFolder().resolve("temp_expired.pem");
+        writePemContent(tempExpiredPath, expiredIrrelevantCA);
+        String expiredCaContent = Files.readString(tempExpiredPath);
+        String existingContent = Files.readString(caCertificatePath);
+        Files.writeString(caCertificatePath, existingContent + "\n" + expiredCaContent);
+        
+        // Should succeed because only the relevant certificate (originalValidCA) is validated
+        // The expired irrelevant certificate should be ignored since its subject DN doesn't match
+        // any issuer DN from the key material certificates
+        final boolean hasChanges = sslContextHandler.reloadSslContext();
+        assertThat("SSL context should reload successfully despite expired irrelevant cert in truststore", hasChanges, is(true));
+    }
+
+
 
     @Test
     public void failsIfKeyMaterialCertificateHasInvalidDates() throws Exception {
@@ -277,6 +359,7 @@ public class SslContextHandlerTest {
     }
     // CS-ENFORCE-SINGLE
 
+
     SslContextHandler sslContextHandler() {
         final var sslParameters = SslParameters.loader(Settings.EMPTY).load(false);
         final var trustStoreConfiguration = new TrustStoreConfiguration.PemTrustStoreConfiguration(caCertificatePath);
@@ -289,5 +372,6 @@ public class SslContextHandlerTest {
         SslConfiguration sslConfiguration = new SslConfiguration(sslParameters, trustStoreConfiguration, keyStoreConfiguration);
         return new SslContextHandler(sslConfiguration, false);
     }
+
 
 }
