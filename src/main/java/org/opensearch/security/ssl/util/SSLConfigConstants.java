@@ -45,6 +45,35 @@ public final class SSLConfigConstants {
     public static final String DEFAULT_STORE_TYPE = "JKS";
     public static final String SSL_PREFIX = "plugins.security.ssl.";
 
+    // PQC POC: runtime-selectable JSSE/crypto provider. JDK (default, no PQC TLS today) | BCJSSE (non-FIPS
+    // BouncyCastle, PQC available now) | BCFIPS (FIPS BouncyCastle, PQC activates once BC-FIPS ships ML-KEM).
+    public static final String SECURITY_SSL_PROVIDER = SSL_PREFIX + "provider";
+    public static final String SECURITY_SSL_PROVIDER_JDK = "JDK";
+    public static final String SECURITY_SSL_PROVIDER_BCJSSE = "BCJSSE";
+    public static final String SECURITY_SSL_PROVIDER_BCFIPS = "BCFIPS";
+    public static final String SECURITY_SSL_PROVIDER_DEFAULT = SECURITY_SSL_PROVIDER_JDK;
+    // Both BC flavours register their JSSE provider under this name.
+    public static final String BC_JSSE_PROVIDER_NAME = "BCJSSE";
+
+    // PQC: when true, a PQC-only group/signature-scheme list (no classical fallback) is a hard error instead of
+    // a warning. Default false => warn only, so operators are not surprised mid rolling-upgrade.
+    public static final String SECURITY_SSL_ENFORCE_CLASSICAL_FALLBACK = SSL_PREFIX + "enforce_classical_fallback";
+
+    // PQC: curated known names for validation. Compared case-insensitively (configured values are lower-cased).
+    public static final java.util.Set<String> KNOWN_CLASSICAL_GROUPS = java.util.Set.of(
+        "x25519", "x448", "secp256r1", "secp384r1", "secp521r1", "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192"
+    );
+    public static final java.util.Set<String> KNOWN_PQC_GROUPS = java.util.Set.of(
+        "x25519mlkem768", "secp256r1mlkem768", "secp384r1mlkem1024", "mlkem512", "mlkem768", "mlkem1024"
+    );
+    public static final java.util.Set<String> KNOWN_CLASSICAL_SIGNATURE_SCHEMES = java.util.Set.of(
+        "ecdsa_secp256r1_sha256", "ecdsa_secp384r1_sha384", "ecdsa_secp521r1_sha512",
+        "rsa_pss_rsae_sha256", "rsa_pss_rsae_sha384", "rsa_pss_rsae_sha512",
+        "rsa_pss_pss_sha256", "rsa_pss_pss_sha384", "rsa_pss_pss_sha512",
+        "rsa_pkcs1_sha256", "rsa_pkcs1_sha384", "rsa_pkcs1_sha512", "ed25519", "ed448"
+    );
+    public static final java.util.Set<String> KNOWN_PQC_SIGNATURE_SCHEMES = java.util.Set.of("mldsa44", "mldsa65", "mldsa87");
+
     public static final String KEYSTORE_TYPE = "keystore_type";
     public static final String KEYSTORE_ALIAS = "keystore_alias";
     public static final String KEYSTORE_FILEPATH = "keystore_filepath";
@@ -63,6 +92,11 @@ public final class SSLConfigConstants {
 
     public static final String ENABLED_PROTOCOLS = "enabled_protocols";
     public static final String ENABLED_CIPHERS = "enabled_ciphers";
+    // PQC POC: per-layer TLS named-group override (e.g. "X25519MLKEM768"). Empty means JVM/provider default.
+    public static final String ENABLED_GROUPS = "enabled_groups";
+    // PQC: per-layer TLS signature-scheme override (e.g. "mldsa65"). Empty means provider default. Enables
+    // authentication with post-quantum ML-DSA certificates.
+    public static final String ENABLED_SIGNATURE_SCHEMES = "enabled_signature_schemes";
     public static final String PEM_KEY_PASSWORD = "pemkey_password";
 
     /**
@@ -77,6 +111,9 @@ public final class SSLConfigConstants {
     public static final String SECURITY_SSL_HTTP_ENABLED = SSL_HTTP_PREFIX + ENABLED;
     public static final String SECURITY_SSL_HTTP_ENABLED_CIPHERS = SSL_HTTP_PREFIX + ENABLED_CIPHERS;
     public static final String SECURITY_SSL_HTTP_ENABLED_PROTOCOLS = SSL_HTTP_PREFIX + ENABLED_PROTOCOLS;
+    // PQC POC
+    public static final String SECURITY_SSL_HTTP_ENABLED_GROUPS = SSL_HTTP_PREFIX + ENABLED_GROUPS;
+    public static final String SECURITY_SSL_HTTP_ENABLED_SIGNATURE_SCHEMES = SSL_HTTP_PREFIX + ENABLED_SIGNATURE_SCHEMES;
 
     // http keystore settings
     public static final String SECURITY_SSL_HTTP_KEYSTORE_TYPE = SSL_HTTP_PREFIX + KEYSTORE_TYPE;
@@ -125,6 +162,17 @@ public final class SSLConfigConstants {
     public static final Setting.AffixSetting<List<String>> SECURITY_SSL_AUX_ENABLED_PROTOCOLS = Setting.affixKeySetting(
         SSLConfigConstants.SSL_AUX_PREFIX,
         SSLConfigConstants.ENABLED_PROTOCOLS,
+        key -> Setting.listSetting(key, Collections.emptyList(), Function.identity(), Setting.Property.NodeScope)
+    );
+    // PQC: aux/gRPC transport layer key-exchange groups + signature schemes.
+    public static final Setting.AffixSetting<List<String>> SECURITY_SSL_AUX_ENABLED_GROUPS = Setting.affixKeySetting(
+        SSLConfigConstants.SSL_AUX_PREFIX,
+        SSLConfigConstants.ENABLED_GROUPS,
+        key -> Setting.listSetting(key, Collections.emptyList(), Function.identity(), Setting.Property.NodeScope)
+    );
+    public static final Setting.AffixSetting<List<String>> SECURITY_SSL_AUX_ENABLED_SIGNATURE_SCHEMES = Setting.affixKeySetting(
+        SSLConfigConstants.SSL_AUX_PREFIX,
+        SSLConfigConstants.ENABLED_SIGNATURE_SCHEMES,
         key -> Setting.listSetting(key, Collections.emptyList(), Function.identity(), Setting.Property.NodeScope)
     );
     public static final Setting.AffixSetting<String> SECURITY_SSL_AUX_KEYSTORE_FILEPATH = Setting.affixKeySetting(
@@ -187,6 +235,9 @@ public final class SSLConfigConstants {
     public static final String SECURITY_SSL_TRANSPORT_ENABLED = SSL_TRANSPORT_PREFIX + ENABLED;
     public static final String SECURITY_SSL_TRANSPORT_ENABLED_CIPHERS = SSL_TRANSPORT_PREFIX + ENABLED_CIPHERS;
     public static final String SECURITY_SSL_TRANSPORT_ENABLED_PROTOCOLS = SSL_TRANSPORT_PREFIX + ENABLED_PROTOCOLS;
+    // PQC POC
+    public static final String SECURITY_SSL_TRANSPORT_ENABLED_GROUPS = SSL_TRANSPORT_PREFIX + ENABLED_GROUPS;
+    public static final String SECURITY_SSL_TRANSPORT_ENABLED_SIGNATURE_SCHEMES = SSL_TRANSPORT_PREFIX + ENABLED_SIGNATURE_SCHEMES;
 
     // transport keystore settings
     public static final String SECURITY_SSL_TRANSPORT_KEYSTORE_TYPE = SSL_TRANSPORT_PREFIX + KEYSTORE_TYPE;

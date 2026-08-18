@@ -33,7 +33,8 @@ import java.util.function.Supplier;
 import com.fasterxml.jackson.databind.InjectableValues;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider;
+// PQC: BouncyCastle providers are instantiated by reflection (see tryAddSecurityProvider) so the plugin
+// compiles against either the FIPS or the non-FIPS BC jars (which cannot coexist on one classpath).
 
 import org.opensearch.OpenSearchException;
 import org.opensearch.Version;
@@ -97,7 +98,9 @@ import static org.opensearch.common.network.NetworkModule.TRANSPORT_SSL_ENFORCE_
 import static org.opensearch.security.ssl.util.SSLConfigConstants.SECURITY_SSL_AUX_CLIENTAUTH_MODE;
 import static org.opensearch.security.ssl.util.SSLConfigConstants.SECURITY_SSL_AUX_ENABLED;
 import static org.opensearch.security.ssl.util.SSLConfigConstants.SECURITY_SSL_AUX_ENABLED_CIPHERS;
+import static org.opensearch.security.ssl.util.SSLConfigConstants.SECURITY_SSL_AUX_ENABLED_GROUPS;
 import static org.opensearch.security.ssl.util.SSLConfigConstants.SECURITY_SSL_AUX_ENABLED_PROTOCOLS;
+import static org.opensearch.security.ssl.util.SSLConfigConstants.SECURITY_SSL_AUX_ENABLED_SIGNATURE_SCHEMES;
 import static org.opensearch.security.ssl.util.SSLConfigConstants.SECURITY_SSL_AUX_KEYSTORE_FILEPATH;
 import static org.opensearch.security.ssl.util.SSLConfigConstants.SECURITY_SSL_AUX_PEMCERT_FILEPATH;
 import static org.opensearch.security.ssl.util.SSLConfigConstants.SECURITY_SSL_AUX_PEMKEY_FILEPATH;
@@ -461,6 +464,53 @@ public class OpenSearchSecuritySSLPlugin extends Plugin implements SystemIndexPl
                 Property.NodeScope
             )
         );// not filtered here
+        // PQC: runtime-selectable crypto/JSSE provider (JDK | BCJSSE | BCFIPS).
+        settings.add(
+            Setting.simpleString(
+                SSLConfigConstants.SECURITY_SSL_PROVIDER,
+                SSLConfigConstants.SECURITY_SSL_PROVIDER_DEFAULT,
+                Property.NodeScope,
+                Property.Filtered
+            )
+        );
+        // PQC: hard-fail on a PQC-only group/scheme list (no classical fallback) instead of just warning.
+        settings.add(
+            Setting.boolSetting(SSLConfigConstants.SECURITY_SSL_ENFORCE_CLASSICAL_FALLBACK, false, Property.NodeScope, Property.Filtered)
+        );
+        // PQC POC: per-layer TLS named-group override (e.g. "X25519MLKEM768").
+        settings.add(
+            Setting.listSetting(
+                SSLConfigConstants.SECURITY_SSL_HTTP_ENABLED_GROUPS,
+                Collections.emptyList(),
+                Function.identity(),
+                Property.NodeScope
+            )
+        );
+        settings.add(
+            Setting.listSetting(
+                SSLConfigConstants.SECURITY_SSL_TRANSPORT_ENABLED_GROUPS,
+                Collections.emptyList(),
+                Function.identity(),
+                Property.NodeScope
+            )
+        );
+        // PQC: per-layer TLS signature schemes (e.g. "mldsa65") for ML-DSA certificate authentication.
+        settings.add(
+            Setting.listSetting(
+                SSLConfigConstants.SECURITY_SSL_HTTP_ENABLED_SIGNATURE_SCHEMES,
+                Collections.emptyList(),
+                Function.identity(),
+                Property.NodeScope
+            )
+        );
+        settings.add(
+            Setting.listSetting(
+                SSLConfigConstants.SECURITY_SSL_TRANSPORT_ENABLED_SIGNATURE_SCHEMES,
+                Collections.emptyList(),
+                Function.identity(),
+                Property.NodeScope
+            )
+        );
         settings.add(
             Setting.simpleString(SSLConfigConstants.SECURITY_SSL_CLIENT_EXTERNAL_CONTEXT_ID, Property.NodeScope, Property.Filtered)
         );
@@ -623,6 +673,8 @@ public class OpenSearchSecuritySSLPlugin extends Plugin implements SystemIndexPl
                 SECURITY_SSL_AUX_ENABLED,
                 SECURITY_SSL_AUX_ENABLED_CIPHERS,
                 SECURITY_SSL_AUX_ENABLED_PROTOCOLS,
+                SECURITY_SSL_AUX_ENABLED_GROUPS,
+                SECURITY_SSL_AUX_ENABLED_SIGNATURE_SCHEMES,
                 SECURITY_SSL_AUX_KEYSTORE_FILEPATH,
                 SECURITY_SSL_AUX_PEMKEY_FILEPATH,
                 SECURITY_SSL_AUX_PEMKEY_PASSWORD,
@@ -743,11 +795,54 @@ public class OpenSearchSecuritySSLPlugin extends Plugin implements SystemIndexPl
         return this.threadPool;
     }
 
+    /**
+     * PQC: register the crypto/JSSE provider selected by {@code plugins.security.ssl.provider}.
+     * <ul>
+     *   <li>{@code JDK} (default): register nothing; use the platform default (no PQC TLS on current JDKs).</li>
+     *   <li>{@code BCJSSE}: non-FIPS BouncyCastle + BCJSSE — hybrid ML-KEM key exchange works today.</li>
+     *   <li>{@code BCFIPS}: FIPS BouncyCastle + BCJSSE(fips) — PQC groups activate once BC-FIPS ships ML-KEM.</li>
+     * </ul>
+     * Providers are created reflectively so the plugin builds against either BC flavour (they cannot share a
+     * classpath). The crypto provider MUST be highest priority: BC's TLS ML-KEM resolves the primitive via JCA
+     * without pinning a provider, and on JDK 24+ the built-in SunJCE also offers ML-KEM (JEP 496); if the JDK's
+     * implementation wins it is incompatible with BC's TLS layer and the hybrid group becomes unusable.
+     */
     private void tryAddSecurityProvider() {
+        final String provider = settings == null
+            ? SSLConfigConstants.SECURITY_SSL_PROVIDER_DEFAULT
+            : settings.get(SSLConfigConstants.SECURITY_SSL_PROVIDER, SSLConfigConstants.SECURITY_SSL_PROVIDER_DEFAULT);
+        if (SSLConfigConstants.SECURITY_SSL_PROVIDER_JDK.equalsIgnoreCase(provider)) {
+            return;
+        }
+        final boolean fips = SSLConfigConstants.SECURITY_SSL_PROVIDER_BCFIPS.equalsIgnoreCase(provider);
+        final String cryptoClass = fips
+            ? "org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider"
+            : "org.bouncycastle.jce.provider.BouncyCastleProvider";
+        final String cryptoName = fips ? "BCFIPS" : "BC";
         AccessController.doPrivileged(() -> {
-            if (Security.getProvider("BCFIPS") == null) {
-                Security.addProvider(new BouncyCastleFipsProvider());
-                log.debug("Bouncy Castle FIPS Provider added");
+            try {
+                if (Security.getProvider(cryptoName) == null) {
+                    Security.insertProviderAt(
+                        (java.security.Provider) Class.forName(cryptoClass).getDeclaredConstructor().newInstance(),
+                        1
+                    );
+                    log.info("PQC: registered crypto provider [{}] at position 1", cryptoName);
+                }
+                if (Security.getProvider(SSLConfigConstants.BC_JSSE_PROVIDER_NAME) == null) {
+                    final Class<?> jsse = Class.forName("org.bouncycastle.jsse.provider.BouncyCastleJsseProvider");
+                    final java.security.Provider jsseProvider = fips
+                        ? (java.security.Provider) jsse.getDeclaredConstructor(String.class).newInstance("fips:BCFIPS")
+                        : (java.security.Provider) jsse.getDeclaredConstructor().newInstance();
+                    Security.insertProviderAt(jsseProvider, 2);
+                    log.info("PQC: registered JSSE provider [{}] at position 2 (mode={})", SSLConfigConstants.BC_JSSE_PROVIDER_NAME, provider);
+                }
+            } catch (final ReflectiveOperationException e) {
+                throw new OpenSearchException(
+                    "plugins.security.ssl.provider="
+                        + provider
+                        + " selected, but the matching BouncyCastle jars are not on the classpath",
+                    e
+                );
             }
             return null;
         });

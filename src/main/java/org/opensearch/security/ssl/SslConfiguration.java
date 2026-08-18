@@ -92,6 +92,9 @@ public class SslConfiguration {
                 Set<X500Principal> issuerDns = keyStoreConfiguration.getIssuerDns();
                 return SslContextBuilder.forServer(kmFactory)
                     .sslProvider(sslParameters.provider())
+                    // PQC POC: build the JDK SslContext using the BouncyCastle JSSE provider (supports hybrid
+                    // ML-KEM key exchange). Null-safe: null => Netty uses the platform default provider.
+                    .sslContextProvider(java.security.Security.getProvider("BCJSSE"))
                     .clientAuth(sslParameters.clientAuth())
                     .protocols(sslParameters.allowedProtocols().toArray(new String[0]))
                     // TODO we always add all HTTP 2 ciphers, while maybe it is better to set them differently
@@ -130,6 +133,8 @@ public class SslConfiguration {
                 Set<X500Principal> issuerDns = keyStoreConfiguration.getIssuerDns();
                 return SslContextBuilder.forClient()
                     .sslProvider(sslParameters.provider())
+                    // PQC POC: use BouncyCastle JSSE provider (hybrid ML-KEM key exchange). Null-safe.
+                    .sslContextProvider(java.security.Security.getProvider("BCJSSE"))
                     .protocols(sslParameters.allowedProtocols())
                     .ciphers(sslParameters.allowedCiphers())
                     .applicationProtocolConfig(ApplicationProtocolConfig.DISABLED)

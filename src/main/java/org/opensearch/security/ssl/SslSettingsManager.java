@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateException;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -36,6 +37,7 @@ import org.opensearch.security.ssl.config.KeyStoreConfiguration;
 import org.opensearch.security.ssl.config.SslCertificatesLoader;
 import org.opensearch.security.ssl.config.SslParameters;
 import org.opensearch.security.ssl.config.TrustStoreConfiguration;
+import org.opensearch.security.ssl.util.SSLConfigConstants;
 import org.opensearch.watcher.FileChangesListener;
 import org.opensearch.watcher.FileWatcher;
 import org.opensearch.watcher.ResourceWatcherService;
@@ -166,6 +168,7 @@ public class SslSettingsManager {
                 );
                 LOGGER.info("TLS {} Provider                    : {}", auxCert.id(), auxSslParameters.provider());
                 LOGGER.info("Enabled TLS protocols for {} layer : {}", auxCert.id(), auxSslParameters.allowedProtocols());
+                logPqcParameters(auxCert.id(), auxSslParameters);
             }
         }
 
@@ -183,6 +186,7 @@ public class SslSettingsManager {
             );
             LOGGER.info("TLS HTTP Provider                    : {}", httpSslParameters.provider());
             LOGGER.info("Enabled TLS protocols for HTTP layer : {}", httpSslParameters.allowedProtocols());
+            logPqcParameters("HTTP", httpSslParameters);
         }
 
         /*
@@ -222,8 +226,38 @@ public class SslSettingsManager {
             LOGGER.info("TLS Transport Client Provider             : {}", transportSslParameters.provider());
             LOGGER.info("TLS Transport Server Provider             : {}", transportSslParameters.provider());
             LOGGER.info("Enabled TLS protocols for Transport layer : {}", transportSslParameters.allowedProtocols());
+            logPqcParameters("Transport", transportSslParameters);
         }
         return configurationBuilder.build();
+    }
+
+    /**
+     * PQC observability: log the configured key-exchange groups and signature schemes for a layer and whether
+     * they activate post-quantum key exchange / authentication, so operators can confirm PQC adoption at a glance.
+     */
+    private static void logPqcParameters(final String layerId, final SslParameters sslParameters) {
+        final List<String> groups = sslParameters.namedGroups();
+        final List<String> schemes = sslParameters.signatureSchemes();
+        if ((groups == null || groups.isEmpty()) && (schemes == null || schemes.isEmpty())) {
+            return; // no PQC-specific configuration for this layer
+        }
+        final boolean pqcKem = groups != null
+            && groups.stream().anyMatch(g -> SSLConfigConstants.KNOWN_PQC_GROUPS.contains(g.toLowerCase(java.util.Locale.ROOT)));
+        final boolean pqcAuth = schemes != null
+            && schemes.stream()
+                .anyMatch(s -> SSLConfigConstants.KNOWN_PQC_SIGNATURE_SCHEMES.contains(s.toLowerCase(java.util.Locale.ROOT)));
+        LOGGER.info(
+            "TLS key-exchange groups for {} layer : {} (post-quantum KEM: {})",
+            layerId,
+            (groups == null || groups.isEmpty()) ? "<provider default>" : groups,
+            pqcKem
+        );
+        LOGGER.info(
+            "TLS signature schemes for {} layer   : {} (post-quantum auth: {})",
+            layerId,
+            (schemes == null || schemes.isEmpty()) ? "<provider default>" : schemes,
+            pqcAuth
+        );
     }
 
     public void addSslConfigurationsChangeListener(final ResourceWatcherService resourceWatcherService) {

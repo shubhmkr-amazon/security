@@ -56,7 +56,30 @@ public class SslContextHandler {
     }
 
     public SSLEngine createSSLEngine() {
-        return sslContext.newEngine(NettyAllocator.getAllocator());
+        return applyNamedGroups(sslContext.newEngine(NettyAllocator.getAllocator()));
+    }
+
+    /**
+     * PQC POC: if the layer configures {@code enabled_groups} (e.g. "X25519MLKEM768"), enforce those TLS
+     * named (key-exchange) groups on the engine. Read-modify-write preserves the protocols/ciphers/ALPN
+     * that Netty already configured on the engine.
+     */
+    private SSLEngine applyNamedGroups(final SSLEngine engine) {
+        final List<String> groups = sslConfiguration.sslParameters().namedGroups();
+        final List<String> sigSchemes = sslConfiguration.sslParameters().signatureSchemes();
+        if ((groups != null && !groups.isEmpty()) || (sigSchemes != null && !sigSchemes.isEmpty())) {
+            final SSLParameters params = engine.getSSLParameters();
+            if (groups != null && !groups.isEmpty()) {
+                params.setNamedGroups(groups.toArray(new String[0]));
+            }
+            if (sigSchemes != null && !sigSchemes.isEmpty()) {
+                // PQC: enforce signature schemes (e.g. mldsa65) so ML-DSA certificates can authenticate.
+                params.setSignatureSchemes(sigSchemes.toArray(new String[0]));
+            }
+            engine.setSSLParameters(params);
+            LOGGER.info("Applied PQC TLS parameters to SSL engine: groups={} signatureSchemes={}", groups, sigSchemes);
+        }
+        return engine;
     }
 
     /**
@@ -81,7 +104,7 @@ public class SslContextHandler {
             }
             sslEngine.setSSLParameters(sslParams);
         }
-        return sslEngine;
+        return applyNamedGroups(sslEngine);
     }
 
     public SslConfiguration sslConfiguration() {
